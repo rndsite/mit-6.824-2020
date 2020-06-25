@@ -1,10 +1,11 @@
 # MIT 6.824 Spring 2020
 https://pdos.csail.mit.edu/6.824/index.html
 
-## Lab 1
+## Lab 1 MapReduce
 Run map reduce test
 ```
  cd ~/6.824/src/main
+ go get github.com/google/uuid
  sh ./test-mr.sh
 ```
 Messages like the following can be ignored.
