@@ -214,7 +214,7 @@ func (rf *Raft) readPersist(data []byte) {
 // 1. Reply false if term < currentTerm (§5.1)
 // 2. If votedFor is null or candidateId, and candidate’s log is at least as up-to-date as receiver’s log, grant vote (§5.2, §5.4)
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	DPrintf("server %v received vote request", rf.me)
+
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -240,8 +240,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.VoteGranted = false
 
 	// 2. If votedFor is null or candidateId, and candidate’s log is at least as up-to-date as receiver’s log, grant vote (§5.2, §5.4)
-	if (rf.votedFor == -1 || rf.votedFor == args.CandidateID) && rf.isCandidateLogUpToDate(args.Term, args.LastLogIndex) {
-		DPrintf("grant vote to %v from %v", args.CandidateID, rf.me)
+	if (rf.votedFor == -1 || rf.votedFor == args.CandidateID) && rf.isCandidateLogUpToDate(args.LastLogTerm, args.LastLogIndex) {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateID
 		rf.lastAction = time.Now()
@@ -305,27 +304,29 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	reply.Success = true
 
-	// 3. If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it (§5.3)
-	i := args.PrevLogIndex + 1
-	j := 0
-	truncate := false
-	for ; i < len(rf.log); i, j = i+1, j+1 {
-		if j >= len(args.Entries) {
-			break
+	if len(args.Entries) > 0 {
+		// 3. If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it (§5.3)
+		i := args.PrevLogIndex + 1
+		j := 0
+		truncate := false
+		for ; i < len(rf.log); i, j = i+1, j+1 {
+			if j >= len(args.Entries) {
+				break
+			}
+
+			if rf.log[i].Term != args.Entries[j].Term || rf.log[i].Command != args.Entries[j].Command {
+				truncate = true
+				break
+			}
 		}
 
-		if rf.log[i].Term != args.Entries[j].Term || rf.log[i].Command != args.Entries[j].Command {
-			truncate = true
-			break
+		if truncate {
+			rf.log = rf.log[:i]
 		}
-	}
 
-	if truncate {
-		rf.log = rf.log[:i-1]
+		// 4. Append any new entries not already in the log
+		rf.log = append(rf.log, args.Entries[j:]...)
 	}
-
-	// 4. Append any new entries not already in the log
-	rf.log = append(rf.log, args.Entries[j:]...)
 
 	// 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
 	if args.LeaderCommit > rf.commitIndex {
@@ -434,7 +435,7 @@ func (rf *Raft) Start(command interface{}) (index, term int, isLeader bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
-	rf.leaderCond.Signal()
+	rf.leaderCond.Broadcast()
 	rf.followerCond.Signal()
 	rf.applyLogCond.Signal()
 }
@@ -502,10 +503,8 @@ func (rf *Raft) handleVoteReply(args *RequestVoteArgs, reply *RequestVoteReply) 
 	}
 
 	if reply.VoteGranted {
-		DPrintf("server %v got vote", rf.me)
 		rf.voteCount++
 		if rf.voteCount > (len(rf.peers) / 2) {
-			DPrintf("server %v becomes leader", rf.me)
 			rf.state = leader
 			rf.initIndex()
 		}
@@ -521,7 +520,7 @@ func (rf *Raft) initIndex() {
 		rf.nextIndex[i] = rf.lastLogIndex() + 1
 	}
 
-	rf.leaderCond.Signal()
+	rf.leaderCond.Broadcast()
 }
 
 // Caller ensure lock acquired.
@@ -573,7 +572,6 @@ func (rf *Raft) periodicElections() {
 
 		now := time.Now()
 		if now.Sub(rf.lastAction) >= rf.electionTimeout {
-			DPrintf("server %v start election", rf.me)
 			rf.startElection(now)
 		}
 
@@ -595,6 +593,9 @@ func (rf *Raft) handleAppendEntriesReply(server int, args *AppendEntriesArgs, re
 		if reply.Term > rf.currentTerm {
 			rf.currentTerm = reply.Term
 			rf.votedFor = -1
+			if rf.state == leader {
+				rf.followerCond.Signal()
+			}
 			rf.state = follower
 
 			rf.lastAction = time.Now()
