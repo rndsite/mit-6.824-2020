@@ -28,44 +28,11 @@ import (
 	"raft/pkg/labrpc"
 )
 
-/*
-  RULES:
-
-  All Servers:
-    * If commitIndex > lastApplied: increment lastApplied, apply log[lastApplied] to state machine (§5.3)
-	* If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower (§5.1)
-
-  Follower:
-    * Respond to RPCs from candidates and leaders
-    * If election timeout elapses without receiving AppendEntries RPC from current leader or granting vote to candidate: convert to candidate
-
-  Candidate:
-  * On conversion to candidate, start election:
-    * Increment currentTerm
-    * Vote for self
-    * Reset election timer
-    * Send RequestVote RPCs to all other servers
-  * If votes received from majority of servers: become leader
-  * If AppendEntries RPC received from new leader: convert to follower
-  * If election timeout elapses: start new election
-
-  Leader:
-    * Upon election: send initial empty AppendEntries RPCs (heartbeat) to each server; repeat during idle periods to prevent election timeouts (§5.2)
-    * If command received from client: append entry to local log, respond after entry applied to state machine (§5.3)
-    * If last log index ≥ nextIndex for a follower: send AppendEntries RPC with log entries starting at nextIndex
-    * If successful: update nextIndex and matchIndex for follower (§5.3)
-    * If AppendEntries fails because of log inconsistency: decrement nextIndex and retry (§5.3)
-    * If there exists an N such that N > commitIndex, a majority of matchIndex[i] ≥ N, and log[N].term == currentTerm: set commitIndex = N (§5.3, §5.4).
-*/
-
 const (
 	follower serverState = iota + 1
 	candidate
 	leader
 )
-
-// import "bytes"
-// import "../labgob"
 
 type (
 	serverState int
@@ -97,17 +64,17 @@ type (
 		dead      int32               // set by Kill()
 
 		// Persistent state on all servers: (Updated on stable storage before responding to RPCs)
-		currentTerm int        // latest term server has seen (initialized to 0 on first boot, increases monotonically)
-		votedFor    int        // candidateId that received vote in current term (or null if none)
-		log         []LogEntry // log entries; each entry contains command for state machine, and term when entry was received by leader (first index is 1)
+		currentTerm int
+		votedFor    int
+		log         []LogEntry
 
 		// Volatile state on all servers:
-		commitIndex int // index of highest log entry known to be committed (initialized to 0, increases monotonically)
-		lastApplied int // index of highest log entry applied to state machine (initialized to 0, increases monotonically)
+		commitIndex int
+		lastApplied int
 
 		// Volatile state on leaders: (Reinitialized after election)
-		nextIndex  []int // for each server, index of the next log entry to send to that server (initialized to leader last log index + 1)
-		matchIndex []int // for each server, index of highest log entry known to be replicated on server (initialized to 0, increases monotonically)
+		nextIndex  []int
+		matchIndex []int
 
 		state serverState // follower, candidate or leader
 
@@ -183,8 +150,6 @@ func (rf *Raft) GetState() (term int, isleader bool) {
 //
 // Caller ensures lock acquired.
 func (rf *Raft) persist() {
-	// Your code here (2C).
-	// Example:
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	e.Encode(rf.currentTerm)
@@ -201,8 +166,7 @@ func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
-	// Your code here (2C).
-	// Example:
+
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
@@ -224,11 +188,8 @@ func (rf *Raft) readPersist(data []byte) {
 // 1. Reply false if term < currentTerm (§5.1)
 // 2. If votedFor is null or candidateId, and candidate’s log is at least as up-to-date as receiver’s log, grant vote (§5.2, §5.4)
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-
-	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	defer rf.persist()
 
 	// If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower (§5.1)
 	if args.Term > rf.currentTerm {
@@ -257,6 +218,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.lastAction = time.Now()
 		rf.electionTimeout = time.Duration(r1.Intn(300)+300) * time.Millisecond
 	}
+
+	rf.persist()
 }
 
 // Caller ensure lock acquired.
@@ -282,7 +245,6 @@ func (rf *Raft) isCandidateLogUpToDate(candidateTerm int, candidateIdx int) bool
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	defer rf.persist()
 
 	// If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower (§5.1)
 	if args.Term > rf.currentTerm {
@@ -298,17 +260,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Success = false
 	reply.ConflictTerm = -1
 
-	if rf.state != follower {
-		return
-	}
-
-	// 1. Reply false if term < currentTerm (§5.1)
-	if args.Term < rf.currentTerm {
+	if rf.state != follower || args.Term < rf.currentTerm {
 		return
 	}
 
 	rf.lastAction = time.Now()
 	rf.electionTimeout = time.Duration(r1.Intn(300)+300) * time.Millisecond
+
+	defer rf.persist()
 
 	// 2. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
 
@@ -794,7 +753,6 @@ func (rf *Raft) applyLog(applyCh chan ApplyMsg) {
 		rf.mu.Unlock()
 
 		applyCh <- msg
-		time.Sleep(time.Duration(10) * time.Millisecond)
 	}
 }
 
