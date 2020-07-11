@@ -23,3 +23,7 @@ go test -run 2A
 ```
 go test -run 2B
 ```
+### 2C
+```
+go test -run 2C
+```
