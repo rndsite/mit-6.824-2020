@@ -76,14 +76,8 @@ type (
 		nextIndex  []int
 		matchIndex []int
 
-		state serverState // follower, candidate or leader
-
-		leaderCond   *sync.Cond
-		followerCond *sync.Cond
-		applyLogCond *sync.Cond
-
-		voteCount int
-
+		state           serverState // follower, candidate or leader
+		voteCount       int
 		lastAction      time.Time
 		electionTimeout time.Duration
 	}
@@ -93,49 +87,10 @@ type (
 		Term    int
 		Command interface{}
 	}
-
-	// RequestVoteArgs is RequestVote RPC arguments structure.
-	// field names must start with capital letters!
-	RequestVoteArgs struct {
-		// Your data here (2A, 2B).
-		Term         int // candidate’s term
-		CandidateID  int // candidate requesting vote
-		LastLogIndex int // index of candidate’s last log entry (§5.4)
-		LastLogTerm  int // term of candidate’s last log entry (§5.4)
-	}
-
-	// RequestVoteReply is RequestVote RPC reply structure.
-	// field names must start with capital letters!
-	RequestVoteReply struct {
-		// Your data here (2A).
-		Term        int  // currentTerm, for candidate to update itself
-		VoteGranted bool // true means candidate received vote
-	}
-
-	// AppendEntriesArgs is AppendEntries RPC arguments structure.
-	AppendEntriesArgs struct {
-		Term         int        // leader’s term
-		LeaderID     int        // so follower can redirect clients
-		PrevLogIndex int        // index of log entry immediately preceding new ones
-		PrevLogTerm  int        // term of prevLogIndex entry
-		Entries      []LogEntry // log entries to store (empty for heartbeat; may send more than one for efficiency)
-		LeaderCommit int        // leader’s commitIndex
-	}
-
-	// AppendEntriesReply is AppendEntries RPC reply structure.
-	AppendEntriesReply struct {
-		Term    int  // currentTerm, for leader to update itself
-		Success bool // true if follower contained entry matching prevLogIndex and prevLogTerm
-
-		ConflictIndex int
-		ConflictTerm  int
-	}
 )
 
 // GetState returns currentTerm and whether this server believes it is the leader.
 func (rf *Raft) GetState() (term int, isleader bool) {
-
-	// Your code here (2A).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
@@ -167,9 +122,6 @@ func (rf *Raft) readPersist(data []byte) {
 		return
 	}
 
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
 	var term int
@@ -177,156 +129,14 @@ func (rf *Raft) readPersist(data []byte) {
 	var log []LogEntry
 	if d.Decode(&term) != nil || d.Decode(&votedFor) != nil || d.Decode(&log) != nil {
 		//   error...
+		DPrintf("readPersist error: server %d", rf.me)
 	} else {
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+
 		rf.currentTerm = term
 		rf.votedFor = votedFor
 		rf.log = log
-	}
-}
-
-// RequestVote RPC handler.
-// 1. Reply false if term < currentTerm (§5.1)
-// 2. If votedFor is null or candidateId, and candidate’s log is at least as up-to-date as receiver’s log, grant vote (§5.2, §5.4)
-func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
-	// If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower (§5.1)
-	if args.Term > rf.currentTerm {
-		rf.currentTerm = args.Term
-		if rf.state == leader {
-			rf.followerCond.Signal()
-		}
-		rf.state = follower
-		rf.votedFor = -1
-	}
-
-	// 1. Reply false if term < currentTerm (§5.1)
-	if args.Term < rf.currentTerm || rf.state != follower {
-		reply.Term = rf.currentTerm
-		reply.VoteGranted = false
-		return
-	}
-
-	reply.Term = rf.currentTerm
-	reply.VoteGranted = false
-
-	// 2. If votedFor is null or candidateId, and candidate’s log is at least as up-to-date as receiver’s log, grant vote (§5.2, §5.4)
-	if (rf.votedFor == -1 || rf.votedFor == args.CandidateID) && rf.isCandidateLogUpToDate(args.LastLogTerm, args.LastLogIndex) {
-		reply.VoteGranted = true
-		rf.votedFor = args.CandidateID
-		rf.lastAction = time.Now()
-		rf.electionTimeout = time.Duration(r1.Intn(300)+300) * time.Millisecond
-	}
-
-	rf.persist()
-}
-
-// Caller ensure lock acquired.
-func (rf *Raft) isCandidateLogUpToDate(candidateTerm int, candidateIdx int) bool {
-	idx := rf.lastLogIndex()
-	term := rf.log[idx].Term
-
-	// If the logs have last entries with different terms, then the log with the later term is more up-to-date.
-	if term != candidateTerm {
-		return candidateTerm >= term
-	}
-
-	// If the logs end with the same term, then whichever log is longer is more up-to-date.
-	return candidateIdx >= idx
-}
-
-// AppendEntries RPC handler.
-// 1. Reply false if term < currentTerm (§5.1)
-// 2. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
-// 3. If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it (§5.3)
-// 4. Append any new entries not already in the log
-// 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
-func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
-	// If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower (§5.1)
-	if args.Term > rf.currentTerm {
-		rf.currentTerm = args.Term
-		if rf.state == leader {
-			rf.followerCond.Signal()
-		}
-		rf.state = follower
-		rf.votedFor = args.LeaderID
-	}
-
-	reply.Term = rf.currentTerm
-	reply.Success = false
-	reply.ConflictTerm = -1
-
-	if rf.state != follower || args.Term < rf.currentTerm {
-		return
-	}
-
-	rf.lastAction = time.Now()
-	rf.electionTimeout = time.Duration(r1.Intn(300)+300) * time.Millisecond
-
-	defer rf.persist()
-
-	// 2. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
-
-	// If a follower does not have prevLogIndex in its log, it should return with conflictIndex = len(log) and conflictTerm = None.
-	if args.PrevLogIndex > rf.lastLogIndex() {
-		reply.ConflictIndex = len(rf.log)
-		return
-	}
-
-	// If a follower does have prevLogIndex in its log, but the term does not match, it should return conflictTerm = log[prevLogIndex].Term,
-	// and then search its log for the first index whose entry has term equal to conflictTerm.
-	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
-		reply.ConflictTerm = rf.log[args.PrevLogIndex].Term
-
-		for i := 1; i < len(rf.log); i++ {
-			if rf.log[i].Term == reply.ConflictTerm {
-				reply.ConflictIndex = i
-				break
-			}
-		}
-
-		if reply.ConflictIndex == 0 {
-			DPrintf("!!!ERROR!!!")
-		}
-
-		return
-	}
-
-	reply.Success = true
-
-	if len(args.Entries) > 0 {
-		// 3. If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it (§5.3)
-		i := args.PrevLogIndex + 1
-		j := 0
-		truncate := false
-		for ; i < len(rf.log); i, j = i+1, j+1 {
-			if j >= len(args.Entries) {
-				break
-			}
-
-			if rf.log[i].Term != args.Entries[j].Term || rf.log[i].Command != args.Entries[j].Command {
-				truncate = true
-				break
-			}
-		}
-
-		if truncate {
-			rf.log = rf.log[:i]
-		}
-
-		// 4. Append any new entries not already in the log
-		rf.log = append(rf.log, args.Entries[j:]...)
-	}
-
-	// 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
-	if args.LeaderCommit > rf.commitIndex {
-		lastNewEntryIdx := args.PrevLogIndex + len(args.Entries)
-		rf.commitIndex = Min(args.LeaderCommit, lastNewEntryIdx)
-		rf.applyLogCond.Signal()
 	}
 }
 
@@ -396,7 +206,6 @@ func (rf *Raft) Start(command interface{}) (index, term int, isLeader bool) {
 		isLeader = false
 		return
 	}
-
 	index = rf.lastLogIndex() + 1
 	term = rf.currentTerm
 	rf.log = append(rf.log, LogEntry{
@@ -404,14 +213,6 @@ func (rf *Raft) Start(command interface{}) (index, term int, isLeader bool) {
 		Command: command,
 	})
 	rf.persist()
-
-	go func() {
-		rf.mu.Lock()
-		defer rf.mu.Unlock()
-
-		rf.replicate()
-	}()
-
 	return
 }
 
@@ -430,9 +231,6 @@ func (rf *Raft) Start(command interface{}) (index, term int, isLeader bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
-	rf.leaderCond.Broadcast()
-	rf.followerCond.Signal()
-	rf.applyLogCond.Signal()
 }
 
 func (rf *Raft) killed() bool {
@@ -450,19 +248,14 @@ func (rf *Raft) killed() bool {
 // Make() must return quickly, so it should start goroutines for any long-running work.
 func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{
-		me:              me,
-		peers:           peers,
-		persister:       persister,
-		state:           follower,
-		votedFor:        -1,
-		lastAction:      time.Now(),
-		electionTimeout: time.Duration(r1.Intn(300)+300) * time.Millisecond,
+		me:        me,
+		peers:     peers,
+		persister: persister,
+		state:     follower,
+		votedFor:  -1,
 	}
 	rf.log = append(rf.log, LogEntry{})
-
-	rf.leaderCond = sync.NewCond(&rf.mu)
-	rf.followerCond = sync.NewCond(&rf.mu)
-	rf.applyLogCond = sync.NewCond(&rf.mu)
+	rf.resetElectionTimer()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -470,66 +263,18 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	go rf.periodicElections()
 	go rf.periodicHeartbeats()
 	go rf.periodicUpdateCommitIndex()
-	go rf.applyLog(applyCh)
+	go rf.periodicApplyLog(applyCh)
 
 	return rf
 }
 
-func (rf *Raft) handleVoteReply(args *RequestVoteArgs, reply *RequestVoteReply) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
-	// 1. No need to handle RequestVote RPC reply if have switched state
-	// 2. Old RPC reply, currentTerm has been updated, drop the reply and return
-	if rf.state != candidate || args.Term != rf.currentTerm {
-		return
-	}
-
-	// If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower (§5.1)
-	if reply.Term > rf.currentTerm {
-		rf.currentTerm = reply.Term
-		rf.votedFor = -1
-		rf.state = follower
-
-		rf.persist()
-
-		rf.lastAction = time.Now()
-		rf.electionTimeout = time.Duration(r1.Intn(300)+300) * time.Millisecond
-
-		return
-	}
-
-	if reply.VoteGranted {
-		rf.voteCount++
-		if rf.voteCount > (len(rf.peers) / 2) {
-			rf.state = leader
-			rf.initIndex()
-		}
-	}
-}
-
-// Reinitialize nextIndex[] and matchIndex[] after election
-func (rf *Raft) initIndex() {
-	rf.state = leader
-	rf.nextIndex = make([]int, len(rf.peers))
-	rf.matchIndex = make([]int, len(rf.peers))
-	for i := range rf.nextIndex {
-		rf.nextIndex[i] = rf.lastLogIndex() + 1
-	}
-
-	rf.leaderCond.Broadcast()
-}
-
 // Caller ensure lock acquired.
-func (rf *Raft) startElection(now time.Time) {
+func (rf *Raft) startElection() {
 	rf.state = candidate
-
 	rf.currentTerm++
 	rf.votedFor = rf.me
 	rf.voteCount = 1
-	rf.electionTimeout = time.Duration(r1.Intn(300)+300) * time.Millisecond
-	rf.lastAction = now
-
+	rf.resetElectionTimer()
 	rf.persist()
 
 	args := RequestVoteArgs{
@@ -560,75 +305,14 @@ func (rf *Raft) periodicElections() {
 	for !rf.killed() {
 		rf.mu.Lock()
 
-		for rf.state == leader {
-			rf.followerCond.Wait()
-
-			if rf.killed() {
-				rf.mu.Unlock()
-				return
+		if rf.state != leader {
+			if time.Now().Sub(rf.lastAction) >= rf.electionTimeout {
+				rf.startElection()
 			}
-		}
-
-		now := time.Now()
-		if now.Sub(rf.lastAction) >= rf.electionTimeout {
-			rf.startElection(now)
 		}
 
 		rf.mu.Unlock()
 		time.Sleep(time.Duration(10) * time.Millisecond)
-	}
-}
-
-func (rf *Raft) handleAppendEntriesReply(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
-	if rf.state != leader || args.Term != rf.currentTerm {
-		return
-	}
-
-	if !reply.Success {
-		// If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower (§5.1)
-		if reply.Term > rf.currentTerm {
-			rf.currentTerm = reply.Term
-			rf.votedFor = -1
-			if rf.state == leader {
-				rf.followerCond.Signal()
-			}
-			rf.state = follower
-
-			rf.persist()
-
-			rf.lastAction = time.Now()
-			rf.electionTimeout = time.Duration(r1.Intn(300)+300) * time.Millisecond
-
-			return
-		}
-
-		// Follower didn't set ConflictIndex, don't perform optimization
-		if reply.ConflictIndex == 0 {
-			if rf.nextIndex[server] > 1 {
-				rf.nextIndex[server]--
-			}
-			return
-		}
-
-		if reply.ConflictTerm == -1 {
-			rf.nextIndex[server] = reply.ConflictIndex
-			return
-		}
-
-		for i := rf.lastLogIndex(); i >= 1; i-- {
-			if rf.log[i].Term == reply.ConflictTerm {
-				rf.nextIndex[server] = i + 1
-				return
-			}
-		}
-
-		rf.nextIndex[server] = reply.ConflictIndex
-	} else {
-		rf.nextIndex[server] = args.PrevLogIndex + len(args.Entries) + 1
-		rf.matchIndex[server] = rf.nextIndex[server] - 1
 	}
 }
 
@@ -659,112 +343,103 @@ func (rf *Raft) replicate() {
 	}
 }
 
+// If there exists an N such that N > commitIndex, a majority of matchIndex[i] ≥ N, and log[N].term == currentTerm:
+// set commitIndex = N (§5.3, §5.4).
+//
+// Caller ensure lock acquired.
+func (rf *Raft) updateCommitIndex() {
+	for N := rf.lastLogIndex(); N > rf.commitIndex; N-- {
+		if rf.log[N].Term != rf.currentTerm {
+			continue
+		}
+		count := 1
+		for server := range rf.peers {
+			if server == rf.me {
+				continue
+			}
+			if rf.matchIndex[server] >= N {
+				count++
+				if count > len(rf.peers)/2 {
+					rf.commitIndex = N
+					return
+				}
+			}
+		}
+	}
+}
+
 // Long running loop for leader to update commitIndex
 func (rf *Raft) periodicUpdateCommitIndex() {
 	for !rf.killed() {
+
 		rf.mu.Lock()
-		for rf.state != leader {
-			rf.leaderCond.Wait()
-
-			if rf.killed() {
-				rf.mu.Unlock()
-				return
-			}
+		if rf.state == leader {
+			rf.updateCommitIndex()
 		}
-
-		// If there exists an N such that N > commitIndex, a majority of matchIndex[i] ≥ N, and log[N].term == currentTerm: set commitIndex = N (§5.3, §5.4).
-		for N := rf.lastLogIndex(); N > rf.commitIndex; N-- {
-
-			if rf.log[N].Term > rf.currentTerm {
-				continue
-			}
-
-			if rf.log[N].Term < rf.currentTerm {
-				break
-			}
-
-			count := 1
-			done := false
-			for server := range rf.peers {
-				if rf.matchIndex[server] >= N {
-					count++
-					if count > len(rf.peers)/2 {
-						rf.commitIndex = N
-						rf.applyLogCond.Signal()
-						done = true
-						break
-					}
-				}
-			}
-
-			if done {
-				break
-			}
-
-		}
-
 		rf.mu.Unlock()
+
 		time.Sleep(time.Duration(10) * time.Millisecond)
+
 	}
 }
 
 // Long running loop for leader to send AppendEntries RPC
 func (rf *Raft) periodicHeartbeats() {
+	count := 0
 	for !rf.killed() {
 		rf.mu.Lock()
-		for rf.state != leader {
-			rf.leaderCond.Wait()
-
-			if rf.killed() {
-				rf.mu.Unlock()
-				return
+		if rf.state == leader {
+			count = count % 10
+			if count == 0 {
+				rf.replicate()
 			}
+			count++
+		} else {
+			count = 0
 		}
-
-		rf.replicate()
 		rf.mu.Unlock()
-
-		time.Sleep(time.Duration(120) * time.Millisecond)
+		time.Sleep(time.Duration(10) * time.Millisecond)
 	}
 }
 
 // Long running loop for apply committed log entries
-func (rf *Raft) applyLog(applyCh chan ApplyMsg) {
+func (rf *Raft) periodicApplyLog(applyCh chan ApplyMsg) {
 	for !rf.killed() {
 		// If commitIndex > lastApplied: increment lastApplied, apply log[lastApplied] to state machine (§5.3)
 		rf.mu.Lock()
 
-		for rf.commitIndex <= rf.lastApplied {
-			rf.applyLogCond.Wait()
-
-			if rf.killed() {
-				rf.mu.Unlock()
-				return
+		if rf.commitIndex > rf.lastApplied {
+			rf.lastApplied++
+			msg := ApplyMsg{
+				CommandValid: true,
+				Command:      rf.log[rf.lastApplied].Command,
+				CommandIndex: rf.lastApplied,
 			}
+			rf.mu.Unlock()
+			applyCh <- msg
+		} else {
+			rf.mu.Unlock()
+			time.Sleep(time.Duration(10) * time.Millisecond)
 		}
-
-		rf.lastApplied++
-		msg := ApplyMsg{
-			CommandValid: true,
-			Command:      rf.log[rf.lastApplied].Command,
-			CommandIndex: rf.lastApplied,
-		}
-
-		rf.mu.Unlock()
-
-		applyCh <- msg
 	}
 }
 
-// Caller ensure log acquired.
+// Caller ensure lock acquired.
 func (rf *Raft) lastLogIndex() int {
 	return len(rf.log) - 1
 }
 
-var s1 rand.Source
-var r1 *rand.Rand
+// Caller ensure lock acquired.
+func (rf *Raft) switchToFollower(term int) {
+	rf.state = follower
+	rf.votedFor = -1
+	rf.currentTerm = term
+	rf.persist()
+}
 
-func init() {
-	s1 = rand.NewSource(time.Now().UnixNano())
-	r1 = rand.New(s1)
+// Caller ensure lock acquired.
+func (rf *Raft) resetElectionTimer() {
+	rf.lastAction = time.Now()
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	rf.electionTimeout = time.Duration(r.Intn(300)+300) * time.Millisecond
 }
