@@ -2,19 +2,17 @@ package raft
 
 type (
 	// RequestVoteArgs is RequestVote RPC arguments structure.
-	// field names must start with capital letters!
+	// Field names must start with capital letters!
 	RequestVoteArgs struct {
-		// Your data here (2A, 2B).
 		Term         int // candidate’s term
 		CandidateID  int // candidate requesting vote
-		LastLogIndex int // index of candidate’s last log entry (§5.4)
-		LastLogTerm  int // term of candidate’s last log entry (§5.4)
+		LastLogIndex int // index of candidate’s last log entry (5.4)
+		LastLogTerm  int // term of candidate’s last log entry (5.4)
 	}
 
 	// RequestVoteReply is RequestVote RPC reply structure.
-	// field names must start with capital letters!
+	// Field names must start with capital letters!
 	RequestVoteReply struct {
-		// Your data here (2A).
 		Term        int  // currentTerm, for candidate to update itself
 		VoteGranted bool // true means candidate received vote
 	}
@@ -39,14 +37,12 @@ type (
 	}
 )
 
-// RequestVote RPC handler.
-// 1. Reply false if term < currentTerm (§5.1)
-// 2. If votedFor is null or candidateId, and candidate’s log is at least as up-to-date as receiver’s log, grant vote (§5.2, §5.4)
+// RequestVote RPC handler
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	// If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower (§5.1)
+	// If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower (5.1)
 	if args.Term > rf.currentTerm {
 		rf.switchToFollower(args.Term)
 	}
@@ -58,7 +54,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = false
-	// 2. If votedFor is null or candidateId, and candidate’s log is at least as up-to-date as receiver’s log, grant vote (§5.2, §5.4)
+	// 2. If votedFor is null or candidateId, and candidate’s log is at least as up-to-date as receiver’s log, grant vote (5.2, 5.4)
 	if (rf.votedFor == -1 || rf.votedFor == args.CandidateID) && rf.isCandidateLogUpToDate(args.LastLogTerm, args.LastLogIndex) {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateID
@@ -79,17 +75,12 @@ func (rf *Raft) isCandidateLogUpToDate(candidateTerm int, candidateIdx int) bool
 	return candidateIdx >= idx
 }
 
-// AppendEntries RPC handler.
-// 1. Reply false if term < currentTerm (§5.1)
-// 2. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
-// 3. If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it (§5.3)
-// 4. Append any new entries not already in the log
-// 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
+// AppendEntries RPC handler
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	// If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower (§5.1)
+	// If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower (5.1)
 	if args.Term > rf.currentTerm {
 		rf.switchToFollower(args.Term)
 	}
@@ -100,7 +91,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	rf.resetElectionTimer()
 
-	// 2. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
+	// 2. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (5.3)
 	if args.PrevLogIndex > rf.lastLogIndex() { // If a follower does not have prevLogIndex in its log, it should return with conflictIndex = len(log) and conflictTerm = None.
 		reply.ConflictIndex = len(rf.log)
 		return
@@ -119,7 +110,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 	if len(args.Entries) > 0 {
-		// 3. If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it (§5.3)
+		// 3. If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it (5.3)
 		i := args.PrevLogIndex + 1
 		j := 0
 		for ; i < len(rf.log); i, j = i+1, j+1 {
@@ -143,6 +134,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.LeaderCommit > rf.commitIndex {
 		lastNewEntryIdx := args.PrevLogIndex + len(args.Entries)
 		rf.commitIndex = Min(args.LeaderCommit, lastNewEntryIdx)
+		rf.applyCond.Signal()
 	}
 	reply.Success = true
 }
@@ -156,7 +148,7 @@ func (rf *Raft) handleVoteReply(args *RequestVoteArgs, reply *RequestVoteReply) 
 	if rf.state != candidate || args.Term != rf.currentTerm {
 		return
 	}
-	// If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower (§5.1)
+	// If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower (5.1)
 	if reply.Term > rf.currentTerm {
 		rf.switchToFollower(reply.Term)
 		rf.resetElectionTimer()
@@ -180,41 +172,42 @@ func (rf *Raft) handleVoteReply(args *RequestVoteArgs, reply *RequestVoteReply) 
 	}
 }
 
-func (rf *Raft) handleAppendEntriesReply(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
+func (rf *Raft) handleAppendEntriesReply(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) (retry bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
+	retry = false
 	if rf.state != leader || args.Term != rf.currentTerm {
 		return
 	}
-
 	if reply.Success {
 		rf.nextIndex[server] = args.PrevLogIndex + len(args.Entries) + 1
 		rf.matchIndex[server] = rf.nextIndex[server] - 1
-	} else {
-		// If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower (§5.1)
-		if reply.Term > rf.currentTerm {
-			rf.switchToFollower(reply.Term)
-			rf.resetElectionTimer()
-			return
-		}
-		// Follower didn't set ConflictIndex, don't perform optimization
-		if reply.ConflictIndex == 0 {
-			if rf.nextIndex[server] > 1 {
-				rf.nextIndex[server]--
-			}
-			return
-		}
-		if reply.ConflictTerm == -1 {
-			rf.nextIndex[server] = reply.ConflictIndex
-			return
-		}
-		for i := rf.lastLogIndex(); i >= 1; i-- {
-			if rf.log[i].Term == reply.ConflictTerm {
-				rf.nextIndex[server] = i + 1
-				return
-			}
-		}
-		rf.nextIndex[server] = reply.ConflictIndex
+		return
 	}
+	// If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower (5.1)
+	if reply.Term > rf.currentTerm {
+		rf.switchToFollower(reply.Term)
+		rf.resetElectionTimer()
+		return
+	}
+	retry = true
+	// Follower didn't set ConflictIndex, don't perform optimization
+	if reply.ConflictIndex == 0 {
+		if rf.nextIndex[server] > 1 {
+			rf.nextIndex[server]--
+		}
+		return
+	}
+	// Upon receiving a conflict response, the leader should first search its log for conflictTerm.
+	// If it finds an entry in its log with that term, it should set nextIndex to be the one beyond the index of the last entry in that term in its log.
+	for i := rf.lastLogIndex(); reply.ConflictTerm != -1 && i >= 1; i-- {
+		if rf.log[i].Term == reply.ConflictTerm {
+			rf.nextIndex[server] = i + 1
+			return
+		}
+	}
+	// If it does not find an entry with that term, it should set nextIndex = conflictIndex.
+	rf.nextIndex[server] = reply.ConflictIndex
+	return
 }

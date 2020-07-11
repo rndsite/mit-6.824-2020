@@ -80,6 +80,8 @@ type (
 		voteCount       int
 		lastAction      time.Time
 		electionTimeout time.Duration
+
+		applyCond *sync.Cond
 	}
 
 	// LogEntry represents the content in each log entry.
@@ -128,7 +130,6 @@ func (rf *Raft) readPersist(data []byte) {
 	var votedFor int
 	var log []LogEntry
 	if d.Decode(&term) != nil || d.Decode(&votedFor) != nil || d.Decode(&log) != nil {
-		//   error...
 		DPrintf("readPersist error: server %d", rf.me)
 	} else {
 		rf.mu.Lock()
@@ -198,7 +199,6 @@ func (rf *Raft) Start(command interface{}) (index, term int, isLeader bool) {
 	term = -1
 	isLeader = true
 
-	// Your code here (2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
@@ -230,7 +230,7 @@ func (rf *Raft) Start(command interface{}) (index, term int, isLeader bool) {
 //
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
-	// Your code here, if desired.
+	rf.applyCond.Signal()
 }
 
 func (rf *Raft) killed() bool {
@@ -256,14 +256,13 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	}
 	rf.log = append(rf.log, LogEntry{})
 	rf.resetElectionTimer()
-
-	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
+	rf.applyCond = sync.NewCond(&rf.mu)
+	rf.readPersist(persister.ReadRaftState()) // initialize from state persisted before a crash
 
 	go rf.periodicElections()
 	go rf.periodicHeartbeats()
 	go rf.periodicUpdateCommitIndex()
-	go rf.periodicApplyLog(applyCh)
+	go rf.applyLogLoop(applyCh)
 
 	return rf
 }
@@ -288,9 +287,7 @@ func (rf *Raft) startElection() {
 		if i == rf.me {
 			continue
 		}
-
 		server := i
-
 		go func(i int, args RequestVoteArgs) {
 			reply := RequestVoteReply{}
 			if rf.sendRequestVote(i, &args, &reply) {
@@ -304,13 +301,11 @@ func (rf *Raft) startElection() {
 func (rf *Raft) periodicElections() {
 	for !rf.killed() {
 		rf.mu.Lock()
-
 		if rf.state != leader {
 			if time.Now().Sub(rf.lastAction) >= rf.electionTimeout {
 				rf.startElection()
 			}
 		}
-
 		rf.mu.Unlock()
 		time.Sleep(time.Duration(10) * time.Millisecond)
 	}
@@ -319,32 +314,43 @@ func (rf *Raft) periodicElections() {
 // Caller ensure lock acquried.
 func (rf *Raft) replicate() {
 	for i := range rf.peers {
-
-		if i != rf.me {
-			args := AppendEntriesArgs{
-				Term:         rf.currentTerm,
-				LeaderID:     rf.me,
-				LeaderCommit: rf.commitIndex,
-				PrevLogIndex: rf.nextIndex[i] - 1,
-			}
-			args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
-			if rf.lastLogIndex() >= rf.nextIndex[i] {
-				args.Entries = append(args.Entries, rf.log[rf.nextIndex[i]:]...)
-			}
-
-			go func(i int, args AppendEntriesArgs) {
-				reply := AppendEntriesReply{}
-				if rf.sendAppendEntries(i, &args, &reply) {
-					rf.handleAppendEntriesReply(i, &args, &reply)
-				}
-			}(i, args)
+		if i == rf.me {
+			continue
 		}
+		go func(i int) {
+			for !rf.killed() {
+				rf.mu.Lock()
+				if rf.state != leader {
+					rf.mu.Unlock()
+					return
+				}
+				args := AppendEntriesArgs{
+					Term:         rf.currentTerm,
+					LeaderID:     rf.me,
+					LeaderCommit: rf.commitIndex,
+					PrevLogIndex: rf.nextIndex[i] - 1,
+				}
+				args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
+				if rf.lastLogIndex() >= rf.nextIndex[i] {
+					args.Entries = append(args.Entries, rf.log[rf.nextIndex[i]:]...)
+				}
+				rf.mu.Unlock()
 
+				reply := AppendEntriesReply{}
+				if ok := rf.sendAppendEntries(i, &args, &reply); !ok {
+					time.Sleep(time.Duration(10 * time.Millisecond))
+					continue
+				}
+				if retry := rf.handleAppendEntriesReply(i, &args, &reply); !retry {
+					return
+				}
+			}
+		}(i)
 	}
 }
 
 // If there exists an N such that N > commitIndex, a majority of matchIndex[i] ≥ N, and log[N].term == currentTerm:
-// set commitIndex = N (§5.3, §5.4).
+// set commitIndex = N (5.3, 5.4).
 //
 // Caller ensure lock acquired.
 func (rf *Raft) updateCommitIndex() {
@@ -361,6 +367,7 @@ func (rf *Raft) updateCommitIndex() {
 				count++
 				if count > len(rf.peers)/2 {
 					rf.commitIndex = N
+					rf.applyCond.Signal()
 					return
 				}
 			}
@@ -371,15 +378,12 @@ func (rf *Raft) updateCommitIndex() {
 // Long running loop for leader to update commitIndex
 func (rf *Raft) periodicUpdateCommitIndex() {
 	for !rf.killed() {
-
 		rf.mu.Lock()
 		if rf.state == leader {
 			rf.updateCommitIndex()
 		}
 		rf.mu.Unlock()
-
 		time.Sleep(time.Duration(10) * time.Millisecond)
-
 	}
 }
 
@@ -403,24 +407,26 @@ func (rf *Raft) periodicHeartbeats() {
 }
 
 // Long running loop for apply committed log entries
-func (rf *Raft) periodicApplyLog(applyCh chan ApplyMsg) {
+//
+// If commitIndex > lastApplied: increment lastApplied, apply log[lastApplied] to state machine (5.3)
+func (rf *Raft) applyLogLoop(applyCh chan ApplyMsg) {
 	for !rf.killed() {
-		// If commitIndex > lastApplied: increment lastApplied, apply log[lastApplied] to state machine (§5.3)
 		rf.mu.Lock()
-
-		if rf.commitIndex > rf.lastApplied {
-			rf.lastApplied++
-			msg := ApplyMsg{
-				CommandValid: true,
-				Command:      rf.log[rf.lastApplied].Command,
-				CommandIndex: rf.lastApplied,
+		for rf.commitIndex <= rf.lastApplied {
+			rf.applyCond.Wait()
+			if rf.killed() {
+				rf.mu.Unlock()
+				return
 			}
-			rf.mu.Unlock()
-			applyCh <- msg
-		} else {
-			rf.mu.Unlock()
-			time.Sleep(time.Duration(10) * time.Millisecond)
 		}
+		rf.lastApplied++
+		msg := ApplyMsg{
+			CommandValid: true,
+			Command:      rf.log[rf.lastApplied].Command,
+			CommandIndex: rf.lastApplied,
+		}
+		rf.mu.Unlock()
+		applyCh <- msg
 	}
 }
 
