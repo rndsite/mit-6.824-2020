@@ -9,9 +9,9 @@ package raft
 //
 
 import (
+	"kvdb/internal/labrpc"
 	"log"
 	"math/rand"
-	"raft/pkg/labrpc"
 	"runtime"
 	"sync"
 	"testing"
