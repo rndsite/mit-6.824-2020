@@ -24,8 +24,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"raft/pkg/labgob"
-	"raft/pkg/labrpc"
+	"kvdb/internal/labgob"
+	"kvdb/internal/labrpc"
 )
 
 const (

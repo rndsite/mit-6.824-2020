@@ -59,7 +59,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"raft/pkg/labgob"
+	"kvdb/internal/labgob"
 )
 
 type reqMsg struct {
