@@ -11,8 +11,8 @@ https://pdos.csail.mit.edu/6.824/index.html
     - [ ] Part B: Key/value service with log compaction
 - [ ] Lab 4
 
-### Lab 1 MapReduce
-Run map reduce test
+## Lab 1 MapReduce
+### Run Test
 ```
  cd mapreduce/test
  sh ./test-mr.sh
@@ -21,14 +21,15 @@ Messages like the following can be ignored.
 ```
 2019/12/16 13:27:09 rpc.Register: method "Done" has 1 input parameters; needs exactly three
 ```
-### Lab 2 Raft
+## Lab 2 Raft
 - [Students' Guide to Raft](https://thesquareplanet.com/blog/students-guide-to-raft/)
-#### Run Test
+### Run Test
 ```
 cd raft/pkg/raft
 go test -run <2A/2B/2C>
 ```
-### Lab 3 Fault-tolerant Key/Value Service
+## Lab 3 Fault-tolerant Key/Value Service
+### Run Test
 ```
 cd raft/pkg/kvdb
 go test -run 3A
