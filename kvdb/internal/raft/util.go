@@ -1,6 +1,8 @@
 package raft
 
-import "log"
+import (
+	"log"
+)
 
 // Debugging
 const Debug = 1
@@ -17,4 +19,11 @@ func Min(a int, b int) int {
 		return a
 	}
 	return b
+}
+
+func Max(a int, b int) int {
+	if a < b {
+		return b
+	}
+	return a
 }

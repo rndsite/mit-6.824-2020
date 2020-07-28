@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"bytes"
 	"kvdb/internal/labgob"
 	"log"
 	"sync"
@@ -31,7 +32,8 @@ type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	ID     string
+	Client int64
+	Seq    int64
 	Action string
 	Key    string
 	Value  string
@@ -48,97 +50,98 @@ type KVServer struct {
 
 	// Your definitions here.
 	term             int
-	killCh           chan bool
+	killCh           chan void
 	db               map[string]string
-	applied          map[string]void
+	lastAppliedSeq   map[int64]int64
 	lastAppliedIndex int
-	appliedCond      *sync.Cond
+	chanMap          map[int]chan Op
+	persister        *raft.Persister
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	kv.mu.Lock()
-	defer kv.mu.Unlock()
-
 	reply.Err = OK
-	if _, ok := kv.applied[args.CommandID]; ok {
-		if v, ok := kv.db[args.Key]; ok {
-			reply.Value = v
-			return
-		}
-		reply.Err = ErrNoKey
-		return
-	}
-	commandIndex, _, isLeader := kv.rf.Start(Op{
-		ID:     args.CommandID,
-		Action: "Get",
-		Key:    args.Key,
-	})
-	if !isLeader {
-		reply.Err = ErrWrongLeader
-		return
-	}
-	for {
-		kv.appliedCond.Wait()
-		if kv.killed() {
-			reply.Err = ErrKilled
-			return
-		}
-		if _, isLeader = kv.rf.GetState(); !isLeader {
-			reply.Err = ErrWrongLeader
-			return
-		}
-		if _, ok := kv.applied[args.CommandID]; ok {
-			if v, ok := kv.db[args.Key]; ok {
+	if lastAppliedSeq, ok := kv.lastAppliedSeq[args.Client]; ok {
+		if lastAppliedSeq >= args.Seq {
+			v, ok := kv.db[args.Key]
+			kv.mu.Unlock()
+			if ok {
 				reply.Value = v
 				return
 			}
 			reply.Err = ErrNoKey
 			return
 		}
-		if kv.lastAppliedIndex >= commandIndex {
-			reply.Err = ErrNoAgreement
+	}
+	commandIndex, _, isLeader := kv.rf.Start(Op{Client: args.Client, Seq: args.Seq, Action: "Get", Key: args.Key})
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		kv.mu.Unlock()
+		return
+	}
+	ch, ok := kv.chanMap[commandIndex]
+	if !ok {
+		ch = make(chan Op, 1)
+		kv.chanMap[commandIndex] = ch
+	}
+	kv.mu.Unlock()
+	select {
+	case <-time.After(time.Second):
+		reply.Err = ErrRaftTimeout
+	case op := <-ch:
+		kv.mu.Lock()
+		defer kv.mu.Unlock()
+		close(ch)
+		delete(kv.chanMap, commandIndex)
+		if op.Client == args.Client && op.Seq == args.Seq && op.Action == "Get" && op.Key == args.Key {
+			v, ok := kv.db[args.Key]
+			if ok {
+				reply.Value = v
+				return
+			}
+			reply.Err = ErrNoKey
 			return
 		}
+		reply.Err = ErrNoAgreement
 	}
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
 	kv.mu.Lock()
-	defer kv.mu.Unlock()
-
 	reply.Err = OK
-	if _, ok := kv.applied[args.CommandID]; ok {
-		return
+	if lastAppliedSeq, ok := kv.lastAppliedSeq[args.Client]; ok {
+		if lastAppliedSeq >= args.Seq {
+			kv.mu.Unlock()
+			return
+		}
 	}
-	commandIndex, _, isLeader := kv.rf.Start(Op{
-		ID:     args.CommandID,
-		Action: args.Op,
-		Key:    args.Key,
-		Value:  args.Value,
-	})
+	commandIndex, _, isLeader := kv.rf.Start(Op{Client: args.Client, Seq: args.Seq, Action: args.Op, Key: args.Key, Value: args.Value})
 	if !isLeader {
 		reply.Err = ErrWrongLeader
+		kv.mu.Unlock()
 		return
 	}
-	for {
-		kv.appliedCond.Wait()
-		if kv.killed() {
-			reply.Err = ErrKilled
+	ch, ok := kv.chanMap[commandIndex]
+	if !ok {
+		ch = make(chan Op, 1)
+		kv.chanMap[commandIndex] = ch
+	}
+	kv.mu.Unlock()
+	select {
+	case <-time.After(time.Second):
+		reply.Err = ErrRaftTimeout
+	case op := <-ch:
+		kv.mu.Lock()
+		defer kv.mu.Unlock()
+		close(ch)
+		delete(kv.chanMap, commandIndex)
+		if op.Client == args.Client && op.Seq == args.Seq && op.Action == args.Op && op.Key == args.Key && op.Value == args.Value {
 			return
 		}
-		if _, isLeader = kv.rf.GetState(); !isLeader {
-			reply.Err = ErrWrongLeader
-			return
-		}
-		if _, ok := kv.applied[args.CommandID]; ok {
-			return
-		}
-		if kv.lastAppliedIndex >= commandIndex {
-			reply.Err = ErrNoAgreement
-			return
-		}
+		// Different command got at same index
+		reply.Err = ErrNoAgreement
 	}
 }
 
@@ -156,8 +159,7 @@ func (kv *KVServer) Kill() {
 	atomic.StoreInt32(&kv.dead, 1)
 	kv.rf.Kill()
 	// Your code here, if desired.
-	kv.killCh <- true
-	kv.appliedCond.Broadcast()
+	close(kv.killCh)
 }
 
 func (kv *KVServer) killed() bool {
@@ -165,42 +167,37 @@ func (kv *KVServer) killed() bool {
 	return z == 1
 }
 
+// StartKVServer starts a Key/Value server.
+// Args:
+//    servers[]:    contains the ports of the set of servers that will cooperate via Raft to form the fault-tolerant key/value service.
+//    me:           the index of the current server in servers[].
+//    persister:    the underlying persister to store snapshot.
+//                  The k/v server should store snapshots through the underlying Raft implementation,
+//				    which should call persister.SaveStateAndSnapshot() to atomically save the Raft state along with the snapshot.
+//    maxraftstate: the k/v server should snapshot when Raft's saved state exceeds maxraftstate bytes,
+//                  in order to allow Raft to garbage-collect its log.
+//                  if maxraftstate is -1, you don't need to snapshot.
 //
-// servers[] contains the ports of the set of
-// servers that will cooperate via Raft to
-// form the fault-tolerant key/value service.
-// me is the index of the current server in servers[].
-// the k/v server should store snapshots through the underlying Raft
-// implementation, which should call persister.SaveStateAndSnapshot() to
-// atomically save the Raft state along with the snapshot.
-// the k/v server should snapshot when Raft's saved state exceeds maxraftstate bytes,
-// in order to allow Raft to garbage-collect its log. if maxraftstate is -1,
-// you don't need to snapshot.
-// StartKVServer() must return quickly, so it should start goroutines
-// for any long-running work.
-//
+// StartKVServer() must return quickly, so it should start goroutines for any long-running work.
 func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int) *KVServer {
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
 	labgob.Register(Op{})
 
-	kv := new(KVServer)
-	kv.me = me
-	kv.maxraftstate = maxraftstate
+	kv := &KVServer{
+		me:             me,
+		applyCh:        make(chan raft.ApplyMsg),
+		maxraftstate:   maxraftstate,
+		killCh:         make(chan void),
+		db:             make(map[string]string),
+		lastAppliedSeq: make(map[int64]int64),
+		chanMap:        make(map[int]chan Op),
+		persister:      persister,
+	}
 
-	// You may need initialization code here.
-	kv.killCh = make(chan bool)
-	kv.db = make(map[string]string)
-	kv.applied = make(map[string]void)
-	kv.appliedCond = sync.NewCond(&kv.mu)
-	kv.lastAppliedIndex = 0
-
-	kv.applyCh = make(chan raft.ApplyMsg)
+	kv.readPersist(kv.persister.ReadSnapshot())
 	go kv.applyMsgLoop()
-
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
-	go kv.checkStateLoop()
-
 	return kv
 }
 
@@ -211,7 +208,8 @@ func (kv *KVServer) applyMsgLoop() {
 			if msg.CommandValid {
 				command := msg.Command.(Op)
 				kv.mu.Lock()
-				if _, ok := kv.applied[command.ID]; !ok {
+				lastAppliedSeq, ok := kv.lastAppliedSeq[command.Client]
+				if !ok || lastAppliedSeq < command.Seq {
 					switch command.Action {
 					case "Put":
 						kv.db[command.Key] = command.Value
@@ -219,31 +217,67 @@ func (kv *KVServer) applyMsgLoop() {
 						kv.db[command.Key] += command.Value
 					default:
 					}
-					kv.applied[command.ID] = member
+					kv.lastAppliedSeq[command.Client] = command.Seq
 				}
 				kv.lastAppliedIndex = msg.CommandIndex
-				kv.appliedCond.Broadcast()
+				ch, ok := kv.chanMap[msg.CommandIndex]
 				kv.mu.Unlock()
+				if ok {
+					ch <- command
+				}
+				if kv.needSnapshot() {
+					kv.takeSnapshot()
+				}
+			} else {
+				kv.readPersist(msg.Snapshot)
 			}
+
 		case <-kv.killCh:
 			return
 		}
 	}
 }
 
-func (kv *KVServer) checkStateLoop() {
-	for {
-		select {
-		case <-time.After(time.Duration(500) * time.Millisecond):
-			kv.mu.Lock()
-			term, _ := kv.rf.GetState()
-			if term != kv.term {
-				kv.appliedCond.Broadcast()
-				kv.term = term
-			}
-			kv.mu.Unlock()
-		case <-kv.killCh:
-			return
-		}
+func (kv *KVServer) needSnapshot() bool {
+	if kv.maxraftstate == -1 {
+		return false
+	}
+	if kv.persister.RaftStateSize() >= kv.maxraftstate {
+		return true
+	}
+	return false
+}
+
+func (kv *KVServer) takeSnapshot() {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	kv.mu.Lock()
+	e.Encode(kv.db)
+	e.Encode(kv.lastAppliedSeq)
+	e.Encode(kv.lastAppliedIndex)
+	snapshot := w.Bytes()
+	lastAppliedIndex := kv.lastAppliedIndex
+	kv.mu.Unlock()
+	kv.rf.TakeSnapshot(lastAppliedIndex, snapshot)
+}
+
+func (kv *KVServer) readPersist(snapshot []byte) {
+	if snapshot == nil || len(snapshot) < 1 { // bootstrap without any state?
+		return
+	}
+
+	r := bytes.NewBuffer(snapshot)
+	d := labgob.NewDecoder(r)
+	db := map[string]string{}
+	lastAppliedSeq := map[int64]int64{}
+	var lastAppliedIndex int
+	if d.Decode(&db) != nil || d.Decode(&lastAppliedSeq) != nil || d.Decode(&lastAppliedIndex) != nil {
+	} else {
+		kv.mu.Lock()
+		defer kv.mu.Unlock()
+
+		kv.db = db
+		kv.lastAppliedSeq = lastAppliedSeq
+		kv.lastAppliedIndex = lastAppliedIndex
 	}
 }
