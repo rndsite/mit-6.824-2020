@@ -35,6 +35,18 @@ type (
 		ConflictIndex int
 		ConflictTerm  int
 	}
+
+	InstallSnapshotArgs struct {
+		Term              int
+		LeaderID          int
+		LastIncludedIndex int
+		LastIncludedTerm  int
+		Data              []byte
+	}
+
+	InstallSnapshotReply struct {
+		Term int
+	}
 )
 
 // RequestVote RPC handler
@@ -65,8 +77,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 // Caller ensure lock acquired.
 func (rf *Raft) isCandidateLogUpToDate(candidateTerm int, candidateIdx int) bool {
-	idx := rf.lastLogIndex()
-	term := rf.log[idx].Term
+	idx := rf.lastLogicalLogIndex()
+	term := rf.log[rf.toPhysicalIndex(idx)].Term
 	// If the logs have last entries with different terms, then the log with the later term is more up-to-date.
 	if term != candidateTerm {
 		return candidateTerm >= term
@@ -86,20 +98,24 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	reply.Term = rf.currentTerm
 	reply.Success = false
+	reply.ConflictTerm = -1
 	if rf.state != follower || args.Term < rf.currentTerm {
 		return
 	}
 	rf.resetElectionTimer()
 
 	// 2. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (5.3)
-	if args.PrevLogIndex > rf.lastLogIndex() { // If a follower does not have prevLogIndex in its log, it should return with conflictIndex = len(log) and conflictTerm = None.
-		reply.ConflictIndex = len(rf.log)
+	if args.PrevLogIndex < rf.lastIncludedIndex || args.PrevLogIndex > rf.lastLogicalLogIndex() { // If a follower does not have prevLogIndex in its log, it should return with conflictIndex = len(log) and conflictTerm = None.
+		reply.ConflictIndex = rf.lastLogicalLogIndex() + 1
 		return
 	}
-	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm { // If a follower does have prevLogIndex in its log, but the term does not match, it should return conflictTerm = log[prevLogIndex].Term, and then search its log for the first index whose entry has term equal to conflictTerm.
-		reply.ConflictTerm = rf.log[args.PrevLogIndex].Term
-		for i := 1; i < len(rf.log); i++ {
-			if rf.log[i].Term == reply.ConflictTerm {
+	// If a follower does have prevLogIndex in its log, but the term does not match,
+	// it should return conflictTerm = log[prevLogIndex].Term,
+	// and then search its log for the first index whose entry has term equal to conflictTerm.
+	if rf.log[rf.toPhysicalIndex(args.PrevLogIndex)].Term != args.PrevLogTerm {
+		reply.ConflictTerm = rf.log[rf.toPhysicalIndex(args.PrevLogIndex)].Term
+		for i := rf.lastIncludedIndex + 1; i <= rf.lastLogicalLogIndex(); i++ {
+			if rf.log[rf.toPhysicalIndex(i)].Term == reply.ConflictTerm {
 				reply.ConflictIndex = i
 				break
 			}
@@ -113,15 +129,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// 3. If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it (5.3)
 		i := args.PrevLogIndex + 1
 		j := 0
-		for ; i < len(rf.log); i, j = i+1, j+1 {
+		for ; i <= rf.lastLogicalLogIndex(); i, j = i+1, j+1 {
 			if j >= len(args.Entries) {
 				break
 			}
-			if rf.log[i].Term != args.Entries[j].Term || rf.log[i].Command != args.Entries[j].Command {
+			if rf.log[rf.toPhysicalIndex(i)].Term != args.Entries[j].Term || rf.log[rf.toPhysicalIndex(i)].Command != args.Entries[j].Command {
 				if i <= rf.commitIndex {
 					DPrintf("Truncating commited logs!!!")
 				}
-				rf.log = rf.log[:i]
+				rf.log = rf.log[:rf.toPhysicalIndex(i)]
 				break
 			}
 		}
@@ -151,7 +167,6 @@ func (rf *Raft) handleVoteReply(args *RequestVoteArgs, reply *RequestVoteReply) 
 	// If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower (5.1)
 	if reply.Term > rf.currentTerm {
 		rf.switchToFollower(reply.Term)
-		rf.resetElectionTimer()
 		return
 	}
 	if reply.VoteGranted {
@@ -166,48 +181,99 @@ func (rf *Raft) handleVoteReply(args *RequestVoteArgs, reply *RequestVoteReply) 
 				if i == rf.me {
 					continue
 				}
-				rf.nextIndex[i] = rf.lastLogIndex() + 1
+				rf.nextIndex[i] = rf.lastLogicalLogIndex() + 1
 			}
 		}
 	}
 }
 
+// Caller ensure lock acquired.
 func (rf *Raft) handleAppendEntriesReply(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) (retry bool) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
-	retry = false
 	if rf.state != leader || args.Term != rf.currentTerm {
-		return
+		return false
 	}
 	if reply.Success {
 		rf.nextIndex[server] = args.PrevLogIndex + len(args.Entries) + 1
 		rf.matchIndex[server] = rf.nextIndex[server] - 1
-		return
+		rf.updateCommitIndexUnlocked()
+		return false
 	}
 	// If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower (5.1)
 	if reply.Term > rf.currentTerm {
 		rf.switchToFollower(reply.Term)
-		rf.resetElectionTimer()
-		return
+		return false
 	}
-	retry = true
 	// Follower didn't set ConflictIndex, don't perform optimization
 	if reply.ConflictIndex == 0 {
 		if rf.nextIndex[server] > 1 {
 			rf.nextIndex[server]--
 		}
-		return
+		return true
 	}
 	// Upon receiving a conflict response, the leader should first search its log for conflictTerm.
 	// If it finds an entry in its log with that term, it should set nextIndex to be the one beyond the index of the last entry in that term in its log.
-	for i := rf.lastLogIndex(); reply.ConflictTerm != -1 && i >= 1; i-- {
-		if rf.log[i].Term == reply.ConflictTerm {
+	for i := rf.lastLogicalLogIndex(); reply.ConflictTerm != -1 && i > rf.lastIncludedIndex; i-- {
+		if rf.log[rf.toPhysicalIndex(i)].Term == reply.ConflictTerm {
 			rf.nextIndex[server] = i + 1
-			return
+			return true
 		}
 	}
 	// If it does not find an entry with that term, it should set nextIndex = conflictIndex.
 	rf.nextIndex[server] = reply.ConflictIndex
+	return true
+}
+
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if args.Term > rf.currentTerm {
+		rf.switchToFollower(args.Term)
+	}
+	reply.Term = rf.currentTerm
+	if rf.state != follower || args.Term < rf.currentTerm {
+		return
+	}
+	rf.resetElectionTimer()
+	if args.LastIncludedIndex <= rf.lastIncludedIndex {
+		return
+	}
+	// If existing log entry has same index and term as snapshot's last included entry, retain log entries following it and reply
+	if args.LastIncludedIndex <= rf.lastLogicalLogIndex() && rf.log[rf.toPhysicalIndex(args.LastIncludedIndex)].Term == args.LastIncludedTerm {
+		rf.log = rf.log[rf.toPhysicalIndex(args.LastIncludedIndex):]
+	} else {
+		rf.log = []LogEntry{{Term: args.LastIncludedTerm, Command: nil}}
+	}
+
+	rf.lastIncludedIndex = args.LastIncludedIndex
+	rf.lastIncludedTerm = args.LastIncludedTerm
+	rf.commitIndex = Max(rf.commitIndex, rf.lastIncludedIndex)
+	rf.lastApplied = Max(rf.lastApplied, rf.lastIncludedIndex)
+	rf.persistWithSnapshot(args.Data)
+
+	if rf.lastApplied > rf.lastIncludedIndex {
+		return
+	}
+	msg := ApplyMsg{
+		CommandValid: false,
+		Snapshot:     args.Data,
+	}
+	go func(msg ApplyMsg) {
+		rf.applyCh <- msg
+	}(msg)
+}
+
+// Caller ensures lock acquired.
+func (rf *Raft) handleInstallSnapshotReply(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	if rf.state != leader || args.Term != rf.currentTerm {
+		return
+	}
+	if reply.Term > rf.currentTerm {
+		rf.switchToFollower(reply.Term)
+		return
+	}
+	rf.matchIndex[server] = rf.lastIncludedIndex
+	rf.nextIndex[server] = rf.matchIndex[server] + 1
+	rf.updateCommitIndexUnlocked()
 	return
 }

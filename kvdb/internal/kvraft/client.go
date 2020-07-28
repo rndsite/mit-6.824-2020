@@ -4,16 +4,19 @@ import (
 	"crypto/rand"
 	"kvdb/internal/labrpc"
 	"math/big"
-	"strconv"
 	"sync/atomic"
-
-	"github.com/google/uuid"
 )
+
+var ClerkID int64
+
+func init() {
+	ClerkID = 0
+}
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
-	id     string
+	id     int64
 	seq    int64
 	leader int32
 }
@@ -29,7 +32,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
-	ck.id = uuid.New().String()
+	ck.id = atomic.AddInt64(&ClerkID, 1)
 	ck.leader = 0
 	return ck
 }
@@ -50,8 +53,9 @@ func (ck *Clerk) Get(key string) string {
 	N := int32(len(ck.servers))
 	i := atomic.LoadInt32(&ck.leader)
 	args := GetArgs{
-		Key:       key,
-		CommandID: ck.id + "-" + strconv.FormatInt(atomic.AddInt64(&ck.seq, 1), 10),
+		Key:    key,
+		Client: ck.id,
+		Seq:    atomic.AddInt64(&ck.seq, 1),
 	}
 
 	for {
@@ -82,10 +86,11 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	N := int32(len(ck.servers))
 	i := atomic.LoadInt32(&ck.leader)
 	args := PutAppendArgs{
-		Key:       key,
-		Value:     value,
-		Op:        op,
-		CommandID: ck.id + "-" + strconv.FormatInt(atomic.AddInt64(&ck.seq, 1), 10),
+		Key:    key,
+		Value:  value,
+		Op:     op,
+		Client: ck.id,
+		Seq:    atomic.AddInt64(&ck.seq, 1),
 	}
 
 	for {
