@@ -3,14 +3,12 @@ package kvraft
 import (
 	"bytes"
 	"kvdb/internal/labgob"
+	"kvdb/internal/labrpc"
+	"kvdb/internal/raft"
 	"log"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"kvdb/internal/labrpc"
-
-	"kvdb/internal/raft"
 )
 
 type (
