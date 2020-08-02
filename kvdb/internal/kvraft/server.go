@@ -11,10 +11,6 @@ import (
 	"time"
 )
 
-type (
-	void struct{}
-)
-
 var member void
 
 const Debug = 1
@@ -26,35 +22,37 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-type Op struct {
-	// Your definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
-	Client int64
-	Seq    int64
-	Action string
-	Key    string
-	Value  string
-}
+type (
+	void struct{}
+	Op   struct {
+		// Your definitions here.
+		// Field names must start with capital letters,
+		// otherwise RPC will break.
+		Client int64
+		Seq    int64
+		Action string
+		Key    string
+		Value  string
+	}
 
-type KVServer struct {
-	mu      sync.Mutex
-	me      int
-	rf      *raft.Raft
-	applyCh chan raft.ApplyMsg
-	dead    int32 // set by Kill()
+	KVServer struct {
+		mu      sync.Mutex
+		me      int
+		rf      *raft.Raft
+		applyCh chan raft.ApplyMsg
+		dead    int32 // set by Kill()
 
-	maxraftstate int // snapshot if log grows this big
+		maxraftstate int // snapshot if log grows this big
 
-	// Your definitions here.
-	term             int
-	killCh           chan void
-	db               map[string]string
-	lastAppliedSeq   map[int64]int64
-	lastAppliedIndex int
-	chanMap          map[int]chan Op
-	persister        *raft.Persister
-}
+		// Your definitions here.
+		killCh           chan void
+		db               map[string]string
+		lastAppliedSeq   map[int64]int64
+		lastAppliedIndex int
+		chanMap          map[int]chan Op
+		persister        *raft.Persister
+	}
+)
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
