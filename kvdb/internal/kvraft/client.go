@@ -29,12 +29,10 @@ func nrand() int64 {
 }
 
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
-	ck := new(Clerk)
-	ck.servers = servers
-	// You'll have to add code here.
-	ck.id = atomic.AddInt64(&ClerkID, 1)
-	ck.leader = 0
-	return ck
+	return &Clerk{
+		servers: servers,
+		id:      atomic.AddInt64(&ClerkID, 1),
+	}
 }
 
 //
