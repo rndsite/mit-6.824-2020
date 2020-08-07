@@ -8,12 +8,23 @@ import (
 	"crypto/rand"
 	"kvdb/internal/labrpc"
 	"math/big"
+	"sync/atomic"
 	"time"
 )
 
+// ClerkID ...
+var ClerkID int64
+
+func init() {
+	ClerkID = 0
+}
+
+// Clerk ...
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// Your data here.
+	id  int64
+	seq int64
 }
 
 func nrand() int64 {
@@ -23,17 +34,22 @@ func nrand() int64 {
 	return x
 }
 
+// MakeClerk ...
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// Your code here.
+	ck.id = atomic.AddInt64(&ClerkID, 1)
 	return ck
 }
 
+// Query ...
 func (ck *Clerk) Query(num int) Config {
-	args := &QueryArgs{}
-	// Your code here.
-	args.Num = num
+	args := &QueryArgs{
+		Num:   num,
+		Clerk: ck.id,
+		Seq:   atomic.AddInt64(&ck.seq, 1),
+	}
 	for {
 		// try each known server.
 		for _, srv := range ck.servers {
@@ -47,11 +63,13 @@ func (ck *Clerk) Query(num int) Config {
 	}
 }
 
+// Join ...
 func (ck *Clerk) Join(servers map[int][]string) {
-	args := &JoinArgs{}
-	// Your code here.
-	args.Servers = servers
-
+	args := &JoinArgs{
+		Servers: servers,
+		Clerk:   ck.id,
+		Seq:     atomic.AddInt64(&ck.seq, 1),
+	}
 	for {
 		// try each known server.
 		for _, srv := range ck.servers {
@@ -65,11 +83,13 @@ func (ck *Clerk) Join(servers map[int][]string) {
 	}
 }
 
+// Leave ...
 func (ck *Clerk) Leave(gids []int) {
-	args := &LeaveArgs{}
-	// Your code here.
-	args.GIDs = gids
-
+	args := &LeaveArgs{
+		GIDs:  gids,
+		Clerk: ck.id,
+		Seq:   atomic.AddInt64(&ck.seq, 1),
+	}
 	for {
 		// try each known server.
 		for _, srv := range ck.servers {
@@ -83,12 +103,14 @@ func (ck *Clerk) Leave(gids []int) {
 	}
 }
 
+// Move ...
 func (ck *Clerk) Move(shard int, gid int) {
-	args := &MoveArgs{}
-	// Your code here.
-	args.Shard = shard
-	args.GID = gid
-
+	args := &MoveArgs{
+		Shard: shard,
+		GID:   gid,
+		Clerk: ck.id,
+		Seq:   atomic.AddInt64(&ck.seq, 1),
+	}
 	for {
 		// try each known server.
 		for _, srv := range ck.servers {
