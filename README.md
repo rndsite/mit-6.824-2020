@@ -26,6 +26,8 @@ Messages like the following can be ignored.
 ## Lab 2 Raft
 - [Raft paper](https://pdos.csail.mit.edu/6.824/papers/raft-extended.pdf)
 - [Students' Guide to Raft](https://thesquareplanet.com/blog/students-guide-to-raft/)
+- [Raft Locking Advice](https://pdos.csail.mit.edu/6.824/labs/raft-locking.txt)
+- [Raft Structure Advice](https://pdos.csail.mit.edu/6.824/labs/raft-structure.txt)
 ### Run Test
 ```
 cd kvdb/internal/raft
