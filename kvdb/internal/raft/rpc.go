@@ -133,7 +133,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			if j >= len(args.Entries) {
 				break
 			}
-			if rf.log[rf.toPhysicalIndex(i)].Term != args.Entries[j].Term || rf.log[rf.toPhysicalIndex(i)].Command != args.Entries[j].Command {
+			if rf.log[rf.toPhysicalIndex(i)].Term != args.Entries[j].Term {
 				if i <= rf.commitIndex {
 					DPrintf("Truncating commited logs!!!")
 				}

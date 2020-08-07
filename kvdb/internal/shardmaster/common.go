@@ -34,8 +34,28 @@ const (
 
 type Err string
 
+type RPCArgs interface {
+	GetClerk() int64
+	GetSeq() int64
+}
+
+type RPCReply interface {
+	SetWrongLeader(bool)
+}
+
 type JoinArgs struct {
 	Servers map[int][]string // new GID -> servers mappings
+
+	Clerk int64
+	Seq   int64
+}
+
+func (j JoinArgs) GetClerk() int64 {
+	return j.Clerk
+}
+
+func (j JoinArgs) GetSeq() int64 {
+	return j.Seq
 }
 
 type JoinReply struct {
@@ -43,8 +63,23 @@ type JoinReply struct {
 	Err         Err
 }
 
+func (j *JoinReply) SetWrongLeader(wrong bool) {
+	j.WrongLeader = wrong
+}
+
 type LeaveArgs struct {
 	GIDs []int
+
+	Clerk int64
+	Seq   int64
+}
+
+func (l LeaveArgs) GetClerk() int64 {
+	return l.Clerk
+}
+
+func (l LeaveArgs) GetSeq() int64 {
+	return l.Seq
 }
 
 type LeaveReply struct {
@@ -52,9 +87,24 @@ type LeaveReply struct {
 	Err         Err
 }
 
+func (l *LeaveReply) SetWrongLeader(wrong bool) {
+	l.WrongLeader = wrong
+}
+
 type MoveArgs struct {
 	Shard int
 	GID   int
+
+	Clerk int64
+	Seq   int64
+}
+
+func (m MoveArgs) GetClerk() int64 {
+	return m.Clerk
+}
+
+func (m MoveArgs) GetSeq() int64 {
+	return m.Seq
 }
 
 type MoveReply struct {
@@ -62,12 +112,31 @@ type MoveReply struct {
 	Err         Err
 }
 
+func (m *MoveReply) SetWrongLeader(wrong bool) {
+	m.WrongLeader = wrong
+}
+
 type QueryArgs struct {
 	Num int // desired config number
+
+	Clerk int64
+	Seq   int64
+}
+
+func (q QueryArgs) GetClerk() int64 {
+	return q.Clerk
+}
+
+func (q QueryArgs) GetSeq() int64 {
+	return q.Seq
 }
 
 type QueryReply struct {
 	WrongLeader bool
 	Err         Err
 	Config      Config
+}
+
+func (q *QueryReply) SetWrongLeader(wrong bool) {
+	q.WrongLeader = wrong
 }
