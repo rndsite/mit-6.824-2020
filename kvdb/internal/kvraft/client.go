@@ -2,16 +2,11 @@ package kvraft
 
 import (
 	"crypto/rand"
-	"kvdb/internal/labrpc"
 	"math/big"
 	"sync/atomic"
+
+	"kvdb/internal/labrpc"
 )
-
-var ClerkID int64
-
-func init() {
-	ClerkID = 0
-}
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
@@ -31,7 +26,7 @@ func nrand() int64 {
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	return &Clerk{
 		servers: servers,
-		id:      atomic.AddInt64(&ClerkID, 1),
+		id:      nrand(),
 	}
 }
 
@@ -107,6 +102,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 func (ck *Clerk) Put(key string, value string) {
 	ck.PutAppend(key, value, "Put")
 }
+
 func (ck *Clerk) Append(key string, value string) {
 	ck.PutAppend(key, value, "Append")
 }

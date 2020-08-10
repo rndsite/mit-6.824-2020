@@ -455,14 +455,20 @@ func (rf *Raft) applyLogLoop() {
 				return
 			}
 		}
-		rf.lastApplied++
-		msg := ApplyMsg{
-			CommandValid: true,
-			Command:      rf.log[rf.toPhysicalIndex(rf.lastApplied)].Command,
-			CommandIndex: rf.lastApplied,
+		rf.commitIndex = Max(rf.commitIndex, rf.lastIncludedIndex)
+		rf.lastApplied = Max(rf.lastApplied, rf.lastIncludedIndex)
+		if rf.commitIndex > rf.lastApplied {
+			rf.lastApplied++
+			msg := ApplyMsg{
+				CommandValid: true,
+				Command:      rf.log[rf.toPhysicalIndex(rf.lastApplied)].Command,
+				CommandIndex: rf.lastApplied,
+			}
+			rf.mu.Unlock()
+			rf.applyCh <- msg
+		} else {
+			rf.mu.Unlock()
 		}
-		rf.mu.Unlock()
-		rf.applyCh <- msg
 	}
 }
 

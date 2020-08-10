@@ -2,13 +2,14 @@ package kvraft
 
 import (
 	"bytes"
-	"kvdb/internal/labgob"
-	"kvdb/internal/labrpc"
-	"kvdb/internal/raft"
 	"log"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"kvdb/internal/labgob"
+	"kvdb/internal/labrpc"
+	"kvdb/internal/raft"
 )
 
 var member void
@@ -22,54 +23,41 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-type (
-	void struct{}
-	Op   struct {
-		// Your definitions here.
-		// Field names must start with capital letters,
-		// otherwise RPC will break.
-		Client int64
-		Seq    int64
-		Action string
-		Key    string
-		Value  string
-	}
+type void struct{}
 
-	KVServer struct {
-		mu      sync.Mutex
-		me      int
-		rf      *raft.Raft
-		applyCh chan raft.ApplyMsg
-		dead    int32 // set by Kill()
+type Op struct {
+	// Your definitions here.
+	// Field names must start with capital letters,
+	// otherwise RPC will break.
+	Client int64
+	Seq    int64
+	Action string
+	Key    string
+	Value  string
+}
 
-		maxraftstate int // snapshot if log grows this big
+type KVServer struct {
+	mu      sync.Mutex
+	me      int
+	rf      *raft.Raft
+	applyCh chan raft.ApplyMsg
+	dead    int32 // set by Kill()
 
-		// Your definitions here.
-		killCh           chan void
-		db               map[string]string
-		lastAppliedSeq   map[int64]int64
-		lastAppliedIndex int
-		chanMap          map[int]chan Op
-		persister        *raft.Persister
-	}
-)
+	maxraftstate int // snapshot if log grows this big
+
+	// Your definitions here.
+	killCh           chan void
+	db               map[string]string
+	lastAppliedSeq   map[int64]int64
+	lastAppliedIndex int
+	chanMap          map[int]chan Op
+	persister        *raft.Persister
+}
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	kv.mu.Lock()
 	reply.Err = OK
-	if lastAppliedSeq, ok := kv.lastAppliedSeq[args.Client]; ok {
-		if lastAppliedSeq >= args.Seq {
-			v, ok := kv.db[args.Key]
-			kv.mu.Unlock()
-			if ok {
-				reply.Value = v
-				return
-			}
-			reply.Err = ErrNoKey
-			return
-		}
-	}
 	commandIndex, _, isLeader := kv.rf.Start(Op{Client: args.Client, Seq: args.Seq, Action: "Get", Key: args.Key})
 	if !isLeader {
 		reply.Err = ErrWrongLeader
@@ -107,12 +95,6 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
 	kv.mu.Lock()
 	reply.Err = OK
-	if lastAppliedSeq, ok := kv.lastAppliedSeq[args.Client]; ok {
-		if lastAppliedSeq >= args.Seq {
-			kv.mu.Unlock()
-			return
-		}
-	}
 	commandIndex, _, isLeader := kv.rf.Start(Op{Client: args.Client, Seq: args.Seq, Action: args.Op, Key: args.Key, Value: args.Value})
 	if !isLeader {
 		reply.Err = ErrWrongLeader
@@ -141,16 +123,11 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 }
 
-//
-// the tester calls Kill() when a KVServer instance won't
-// be needed again. for your convenience, we supply
-// code to set rf.dead (without needing a lock),
-// and a killed() method to test rf.dead in
-// long-running loops. you can also add your own
-// code to Kill(). you're not required to do anything
-// about this, but it may be convenient (for example)
-// to suppress debug output from a Kill()ed instance.
-//
+// Kill kills a KVServer instance.
+// For your convenience, we supply code to set rf.dead (without needing a lock),
+// and a killed() method to test rf.dead in long-running loops.
+// You can also add your own code to Kill().
+// You're not required to do anything about this, but it may be convenient (for example) to suppress debug output from a Kill()ed instance.
 func (kv *KVServer) Kill() {
 	atomic.StoreInt32(&kv.dead, 1)
 	kv.rf.Kill()
