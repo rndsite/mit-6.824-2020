@@ -267,8 +267,7 @@ func (kv *KVServer) readPersist(snapshot []byte) {
 	db := map[string]string{}
 	lastAppliedSeq := map[int64]int64{}
 	var lastAppliedIndex int
-	if d.Decode(&db) != nil || d.Decode(&lastAppliedSeq) != nil || d.Decode(&lastAppliedIndex) != nil {
-	} else {
+	if d.Decode(&db) == nil && d.Decode(&lastAppliedSeq) == nil && d.Decode(&lastAppliedIndex) == nil {
 		kv.mu.Lock()
 		defer kv.mu.Unlock()
 
